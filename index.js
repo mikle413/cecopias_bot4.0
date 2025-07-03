@@ -1,18 +1,13 @@
-// index.js
+require('dotenv').config();
+console.log("TOKEN DEBUG:", process.env.MERCADOPAGO_ACCESS_TOKEN?.slice(0,10)); // Linha de debug, pode remover depois
 
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mercadopago = require('mercadopago');
-const services = require('./services'); // Sua lista de serviços
-require('dotenv').config();
+const services = require('./services');
 
 mercadopago.configure({
   access_token: process.env.MERCADOPAGO_ACCESS_TOKEN
-});
-
-const client = new Client({
-  authStrategy: new LocalAuth(),
-  puppeteer: { headless: true, args: ['--no-sandbox'] }
 });
 
 const DADOS_LOJA = {
@@ -30,7 +25,7 @@ function formatarMensagemBonita(titulo, corpo, rodape = '') {
 }
 
 function normalizarTexto(texto) {
-  return texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
 function identificarServicoCurto(texto) {
@@ -64,6 +59,11 @@ async function gerarLinkPagamento(clienteId, valor, descricao) {
   }
 }
 
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: { headless: true, args: ['--no-sandbox'] }
+});
+
 client.on('qr', qr => {
   qrcode.generate(qr, { small: true });
   console.log('Escaneie o QR code acima para conectar o WhatsApp.');
@@ -86,10 +86,9 @@ client.on('message', async msg => {
       arquivoRecebido: false
     };
   }
-
   const estado = clientes[id];
 
-  // 1. Saudações e mensagens iniciais, aceita emojis, "." etc.
+  // 1. Saudações e mensagens iniciais
   const saudações = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', '.', '👋', '👍'];
   if (!estado.saudou && (saudações.includes(texto) || texto === '' || texto.match(/^[\p{Emoji}\s]+$/u))) {
     estado.saudou = true;
@@ -102,18 +101,17 @@ client.on('message', async msg => {
     return;
   }
 
-  // 8. Arquivo recebido: responde só uma vez
+  // 2. Arquivo recebido: responde só uma vez
   if (msg.hasMedia && !estado.arquivoRecebido) {
     estado.arquivoRecebido = true;
     await msg.reply('📄 Arquivo recebido! Aguardo suas instruções para continuar o atendimento.');
     return;
   }
   if (msg.hasMedia && estado.arquivoRecebido) {
-    // Ignora novos arquivos sem instrução para evitar spam
-    return;
+    return; // Ignora novos arquivos
   }
 
-  // 2 e 3. Identificar pedido e orçamento
+  // 3. Identificar pedido e orçamento
   if (!estado.esperandoConfirmacao) {
     const servico = identificarServicoCurto(texto);
     if (servico) {
@@ -122,28 +120,24 @@ client.on('message', async msg => {
       await msg.reply(`💰 Orçamento para *${servico.nome}*: R$${servico.precoPadrao.toFixed(2)}. Deseja confirmar o pedido? (sim/não)`);
       return;
     }
-
-    // 6. Responder dúvidas simples
+    // Responder dúvidas simples
     if (textoOriginal.endsWith('?')) {
       await msg.reply('❓ Pode perguntar! Estou aqui para ajudar com os serviços da Ce Cópias.');
       return;
     }
-
     // Mensagem não entendida
     await msg.reply('🤔 Não entendi. Por favor, diga se deseja xerox, foto 3x4, impressão, digitalização ou outra coisa.');
     return;
   }
 
-  // 4 e 5. Confirmar pedido e enviar pagamento
+  // 4. Confirmar pedido e enviar pagamento
   if (estado.esperandoConfirmacao) {
     if (/^(sim|quero|confirmo|ok|pode ser)$/.test(texto)) {
       estado.esperandoConfirmacao = false;
-
       const linkMP = await gerarLinkPagamento(id, estado.pedido.preco, estado.pedido.nome);
-      let msgPagamento = `Pedido confirmado!\n\n💳 Formas de pagamento:\n`;
+      let msgPagamento = `✅ Pedido confirmado!\n\n💳 Formas de pagamento:\n`;
       if (linkMP) msgPagamento += `1️⃣ Mercado Pago: ${linkMP}\n`;
       msgPagamento += `2️⃣ PIX: ${DADOS_LOJA.pix}\n\nAssim que recebermos o pagamento, começamos o serviço.`;
-
       await msg.reply(msgPagamento);
       return;
     } else if (/^(não|nao|cancelar|desistir)$/.test(texto)) {
