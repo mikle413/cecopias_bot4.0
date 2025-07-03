@@ -1,6 +1,9 @@
+// index.js
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mercadopago = require('mercadopago');
+const services = require('./services'); // Sua lista de serviços
 require('dotenv').config();
 
 mercadopago.configure({
@@ -20,10 +23,24 @@ const DADOS_LOJA = {
   instagram: 'https://www.instagram.com/ce_copias/'
 };
 
-const clientes = {}; // Armazena estado de cada cliente
+const clientes = {};
 
 function formatarMensagemBonita(titulo, corpo, rodape = '') {
   return `✨ *${titulo}*\n\n${corpo}${rodape ? '\n\n' + rodape : ''}`;
+}
+
+function normalizarTexto(texto) {
+  return texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function identificarServicoCurto(texto) {
+  texto = normalizarTexto(texto);
+  for (const servico of services.impressoes) {
+    if (servico.aliases.some(alias => texto.includes(normalizarTexto(alias)))) {
+      return servico;
+    }
+  }
+  return null;
 }
 
 async function gerarLinkPagamento(clienteId, valor, descricao) {
@@ -33,9 +50,9 @@ async function gerarLinkPagamento(clienteId, valor, descricao) {
       external_reference: clienteId,
       payment_methods: { excluded_payment_types: [{ id: "ticket" }] },
       back_urls: {
-        success: "https://api.whatsapp.com/send?phone=" + clienteId.replace("@c.us", ""),
-        failure: "https://api.whatsapp.com/send?phone=" + clienteId.replace("@c.us", ""),
-        pending: "https://api.whatsapp.com/send?phone=" + clienteId.replace("@c.us", "")
+        success: `https://api.whatsapp.com/send?phone=${clienteId.replace("@c.us","")}`,
+        failure: `https://api.whatsapp.com/send?phone=${clienteId.replace("@c.us","")}`,
+        pending: `https://api.whatsapp.com/send?phone=${clienteId.replace("@c.us","")}`
       },
       auto_return: "approved"
     };
@@ -49,7 +66,7 @@ async function gerarLinkPagamento(clienteId, valor, descricao) {
 
 client.on('qr', qr => {
   qrcode.generate(qr, { small: true });
-  console.log('Escaneie o QR code para conectar o WhatsApp.');
+  console.log('Escaneie o QR code acima para conectar o WhatsApp.');
 });
 
 client.on('ready', () => {
@@ -59,7 +76,7 @@ client.on('ready', () => {
 client.on('message', async msg => {
   const id = msg.from;
   const textoOriginal = msg.body?.trim() || '';
-  const texto = textoOriginal.toLowerCase();
+  const texto = normalizarTexto(textoOriginal);
 
   if (!clientes[id]) {
     clientes[id] = {
@@ -72,7 +89,7 @@ client.on('message', async msg => {
 
   const estado = clientes[id];
 
-  // 1. Saudações, aceita variações comuns e emojis iniciais
+  // 1. Saudações e mensagens iniciais, aceita emojis, "." etc.
   const saudações = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', '.', '👋', '👍'];
   if (!estado.saudou && (saudações.includes(texto) || texto === '' || texto.match(/^[\p{Emoji}\s]+$/u))) {
     estado.saudou = true;
@@ -85,54 +102,44 @@ client.on('message', async msg => {
     return;
   }
 
-  // 8. Se for arquivo PDF ou outro mídia (imagem, pdf, doc)
+  // 8. Arquivo recebido: responde só uma vez
   if (msg.hasMedia && !estado.arquivoRecebido) {
     estado.arquivoRecebido = true;
     await msg.reply('📄 Arquivo recebido! Aguardo suas instruções para continuar o atendimento.');
     return;
   }
-
-  // Se for arquivo e já respondeu antes, não responde novamente
   if (msg.hasMedia && estado.arquivoRecebido) {
-    // só avisa uma vez, então ignora aqui
+    // Ignora novos arquivos sem instrução para evitar spam
     return;
   }
 
-  // 2 e 3. Identificar pedido e responder orçamento fixo
+  // 2 e 3. Identificar pedido e orçamento
   if (!estado.esperandoConfirmacao) {
-    if (texto.includes('xerox')) {
-      estado.pedido = { nome: 'xerox preto e branco', preco: 0.15 };
-    } else if (texto.includes('foto 3x4') || texto.includes('foto3x4')) {
-      estado.pedido = { nome: 'foto 3x4', preco: 10.00 };
-    } else if (texto.includes('impressão') || texto.includes('impressao') || texto.includes('imprimir')) {
-      estado.pedido = { nome: 'impressão colorida', preco: 0.80 };
-    } else if (texto.includes('digitalização') || texto.includes('digitalizacao')) {
-      estado.pedido = { nome: 'digitalização de documento', preco: 2.00 };
-    } else {
-      // 6. Se for dúvida
-      if (textoOriginal.endsWith('?')) {
-        await msg.reply('❓ Pode perguntar! Estou aqui para ajudar com os serviços da Ce Cópias.');
-        return;
-      }
-      // 9. Mensagens que não entendeu
-      await msg.reply('🤔 Não entendi. Por favor, diga se deseja xerox, foto 3x4, impressão, digitalização ou outra coisa.');
+    const servico = identificarServicoCurto(texto);
+    if (servico) {
+      estado.pedido = { nome: servico.nome, preco: servico.precoPadrao };
+      estado.esperandoConfirmacao = true;
+      await msg.reply(`💰 Orçamento para *${servico.nome}*: R$${servico.precoPadrao.toFixed(2)}. Deseja confirmar o pedido? (sim/não)`);
       return;
     }
 
-    // Perguntar confirmação
-    estado.esperandoConfirmacao = true;
-    await msg.reply(`💰 Orçamento para *${estado.pedido.nome}*: R$${estado.pedido.preco.toFixed(2)}. Deseja confirmar o pedido? (sim/não)`);
+    // 6. Responder dúvidas simples
+    if (textoOriginal.endsWith('?')) {
+      await msg.reply('❓ Pode perguntar! Estou aqui para ajudar com os serviços da Ce Cópias.');
+      return;
+    }
+
+    // Mensagem não entendida
+    await msg.reply('🤔 Não entendi. Por favor, diga se deseja xerox, foto 3x4, impressão, digitalização ou outra coisa.');
     return;
   }
 
-  // 4 e 5. Confirmar pedido e instruções de pagamento
+  // 4 e 5. Confirmar pedido e enviar pagamento
   if (estado.esperandoConfirmacao) {
     if (/^(sim|quero|confirmo|ok|pode ser)$/.test(texto)) {
       estado.esperandoConfirmacao = false;
 
-      // Gerar link Mercado Pago
       const linkMP = await gerarLinkPagamento(id, estado.pedido.preco, estado.pedido.nome);
-
       let msgPagamento = `Pedido confirmado!\n\n💳 Formas de pagamento:\n`;
       if (linkMP) msgPagamento += `1️⃣ Mercado Pago: ${linkMP}\n`;
       msgPagamento += `2️⃣ PIX: ${DADOS_LOJA.pix}\n\nAssim que recebermos o pagamento, começamos o serviço.`;
