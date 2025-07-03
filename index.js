@@ -1,10 +1,8 @@
-require('dotenv').config();
-console.log("TOKEN DEBUG:", process.env.MERCADOPAGO_ACCESS_TOKEN?.slice(0,10)); // Linha de debug, pode remover depois
-
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mercadopago = require('mercadopago');
 const services = require('./services');
+require('dotenv').config();
 
 mercadopago.configure({
   access_token: process.env.MERCADOPAGO_ACCESS_TOKEN
@@ -59,6 +57,22 @@ async function gerarLinkPagamento(clienteId, valor, descricao) {
   }
 }
 
+// Palavras para saudação (inclui emoji e variantes)
+const SAUDACOES = [
+  'oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', '.', '👋', '👍'
+];
+
+const CONFIRMACOES = [
+  'sim', 'confirmo', 'confirmar', 'confirma', 'quero', 'quero sim', 'quero confirmar', 'ok', 'pode ser'
+];
+
+const NEGACOES = [
+  'nao', 'não', 'cancelar', 'desistir', 'n', 'não quero', 'nao quero', 'não confirmo', 'nao confirmo'
+];
+
+// ============================
+// Inicialização do WhatsApp
+// ============================
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: { headless: true, args: ['--no-sandbox'] }
@@ -78,6 +92,7 @@ client.on('message', async msg => {
   const textoOriginal = msg.body?.trim() || '';
   const texto = normalizarTexto(textoOriginal);
 
+  // Cria estado do cliente se não existir
   if (!clientes[id]) {
     clientes[id] = {
       saudou: false,
@@ -88,31 +103,33 @@ client.on('message', async msg => {
   }
   const estado = clientes[id];
 
-  // 1. Saudações e mensagens iniciais
-  const saudações = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', '.', '👋', '👍'];
-  if (!estado.saudou && (saudações.includes(texto) || texto === '' || texto.match(/^[\p{Emoji}\s]+$/u))) {
+  // Evita saudação duplicada: só responde uma vez por conversa
+  if (
+    !estado.saudou &&
+    (SAUDACOES.includes(texto) || texto === '' || texto.match(/^[\p{Emoji}\s]+$/u))
+    && !estado.esperandoConfirmacao
+    && !estado.pedido
+  ) {
     estado.saudou = true;
     await msg.reply(formatarMensagemBonita(
       `Bem-vindo(a) à ${DADOS_LOJA.nome}!`,
-      `✨ Imprimimos, digitalizamos, fazemos foto 3x4 e muito mais, sempre com rapidez e preço justo.\n\n` +
+      `✨ Imprimimos, digitalizamos, fazemos foto 3x4, contratos, muito mais, sempre com rapidez e preço justo.\n\n` +
       `📍 Endereço: ${DADOS_LOJA.endereco}\n🕗 Horário: ${DADOS_LOJA.horario}\n\n` +
-      `💡 Me diga se deseja xerox, impressão, foto 3x4 ou digitalização.`
+      `💡 Diga o serviço que você deseja: xerox, impressão, foto 3x4, digitalização, contrato de locação, contrato de compra e venda, etc.`
     ));
     return;
   }
 
-  // 2. Arquivo recebido: responde só uma vez
+  // Arquivo recebido: só responde na primeira vez
   if (msg.hasMedia && !estado.arquivoRecebido) {
     estado.arquivoRecebido = true;
     await msg.reply('📄 Arquivo recebido! Aguardo suas instruções para continuar o atendimento.');
     return;
   }
-  if (msg.hasMedia && estado.arquivoRecebido) {
-    return; // Ignora novos arquivos
-  }
+  if (msg.hasMedia && estado.arquivoRecebido) return;
 
-  // 3. Identificar pedido e orçamento
-  if (!estado.esperandoConfirmacao) {
+  // Identifica pedido e orçamento (não entra nesse bloco se já tem pedido pendente)
+  if (!estado.esperandoConfirmacao && !estado.pedido) {
     const servico = identificarServicoCurto(texto);
     if (servico) {
       estado.pedido = { nome: servico.nome, preco: servico.precoPadrao };
@@ -120,35 +137,64 @@ client.on('message', async msg => {
       await msg.reply(`💰 Orçamento para *${servico.nome}*: R$${servico.precoPadrao.toFixed(2)}. Deseja confirmar o pedido? (sim/não)`);
       return;
     }
-    // Responder dúvidas simples
     if (textoOriginal.endsWith('?')) {
       await msg.reply('❓ Pode perguntar! Estou aqui para ajudar com os serviços da Ce Cópias.');
       return;
     }
-    // Mensagem não entendida
-    await msg.reply('🤔 Não entendi. Por favor, diga se deseja xerox, foto 3x4, impressão, digitalização ou outra coisa.');
+    await msg.reply('🤔 Não entendi. Diga o serviço que você quer: xerox, impressão, foto 3x4, contrato de locação, etc.');
     return;
   }
 
-  // 4. Confirmar pedido e enviar pagamento
-  if (estado.esperandoConfirmacao) {
-    if (/^(sim|quero|confirmo|ok|pode ser)$/.test(texto)) {
+  // Lida com confirmação inteligente (aceita várias palavras de confirmação)
+  if (estado.esperandoConfirmacao && estado.pedido) {
+    if (CONFIRMACOES.some(c => texto.includes(c))) {
       estado.esperandoConfirmacao = false;
-      const linkMP = await gerarLinkPagamento(id, estado.pedido.preco, estado.pedido.nome);
-      let msgPagamento = `✅ Pedido confirmado!\n\n💳 Formas de pagamento:\n`;
-      if (linkMP) msgPagamento += `1️⃣ Mercado Pago: ${linkMP}\n`;
-      msgPagamento += `2️⃣ PIX: ${DADOS_LOJA.pix}\n\nAssim que recebermos o pagamento, começamos o serviço.`;
-      await msg.reply(msgPagamento);
+
+      // PERGUNTA qual forma de pagamento
+      await msg.reply(
+        `✅ Pedido confirmado!\n\nComo você prefere pagar?\n\n1️⃣ Cartão (Mercado Pago)\n2️⃣ PIX\n\nResponda: *cartão* ou *pix*`
+      );
+      estado.aguardandoPagamento = true;
       return;
-    } else if (/^(não|nao|cancelar|desistir)$/.test(texto)) {
+    }
+    if (NEGACOES.some(n => texto.includes(n))) {
       estado.esperandoConfirmacao = false;
       estado.pedido = null;
       await msg.reply('Pedido cancelado. Se precisar, é só chamar!');
       return;
-    } else {
-      await msg.reply('Por favor, responda "sim" para confirmar ou "não" para cancelar o pedido.');
+    }
+    await msg.reply('Por favor, responda "sim" para confirmar ou "não" para cancelar o pedido.');
+    return;
+  }
+
+  // Escolha da forma de pagamento (após confirmação do pedido)
+  if (estado.aguardandoPagamento && estado.pedido) {
+    if (texto.includes("cartao") || texto.includes("cartão")) {
+      estado.aguardandoPagamento = false;
+      const linkMP = await gerarLinkPagamento(id, estado.pedido.preco, estado.pedido.nome);
+      await msg.reply(
+        `💳 Pagamento via Cartão de Crédito/Débito:\n\n1️⃣ Clique no link abaixo para pagar com Mercado Pago (cartão de crédito ou débito, pode usar qualquer banco):\n${linkMP}\n\nAssim que recebermos o pagamento, começamos o serviço.`
+      );
+      await msg.reply(
+        `Se preferir, também aceitamos *PIX*!\nChave PIX: ${DADOS_LOJA.pix}\n\nQuando fizer o PIX, envie o comprovante.`
+      );
+      // Limpa o pedido após enviar os métodos
+      estado.pedido = null;
       return;
     }
+    if (texto.includes("pix")) {
+      estado.aguardandoPagamento = false;
+      await msg.reply(
+        `🔑 Pagamento via PIX:\n\nChave PIX: ${DADOS_LOJA.pix}\n\nAssim que recebermos o comprovante, começamos o serviço.\n\nSe quiser pagar no cartão de crédito ou débito, é só responder "cartão".`
+      );
+      // Limpa o pedido após enviar os métodos
+      estado.pedido = null;
+      return;
+    }
+    await msg.reply(
+      `Por favor, responda *cartão* para pagar com Mercado Pago ou *pix* para pagar via PIX.`
+    );
+    return;
   }
 });
 

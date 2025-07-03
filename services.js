@@ -32,5 +32,15 @@ exports.impressoes = [
     { nome: "Impressão no papel 60kg", precoPadrao: 3.00, aliases: ["papel 60kg", "impressão 60kg"] },
     { nome: "Placa de QR Code plastificada", precoPadrao: 15.00, aliases: ["placa qr code", "qr code"] },
     { nome: "Tinta Epson similar 100ml", precoPadrao: 20.00, aliases: ["tinta epson", "tinta"] },
-    // Continue adicionando os serviços que você tem aqui sem remover nada
+    // Novos serviços adicionados abaixo:
+    {
+        nome: "Contrato de Locação",
+        precoPadrao: 30.00,
+        aliases: ["contrato de locação", "locação", "contrato locação", "contrato aluguel", "aluguel"]
+    },
+    {
+        nome: "Contrato de Compra e Venda",
+        precoPadrao: 30.00,
+        aliases: ["contrato de compra e venda", "compra e venda", "contrato venda", "contrato compra"]
+    }
 ];
