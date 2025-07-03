@@ -1,0 +1,19 @@
+{
+  "name": "cecopias_bot",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp Inteligente para Ce Cópias",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "openai": "^4.28.4",
+    "pdf-parse": "^1.1.1",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.23.0",
+    "mercadopago": "1.5.6"
+  },
+  "author": "Mikael",
+  "license": "MIT"
+}
