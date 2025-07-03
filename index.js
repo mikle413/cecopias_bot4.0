@@ -1,10 +1,8 @@
 // =========== IMPORTS PRINCIPAIS ===========
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { OpenAI } = require('openai');
-const services = require('./services');
-const pdf = require('pdf-parse');
-const transcribeAudio = require('./utils/audio_transcriber');
+const services = require('./services'); // Certifique-se que services.js exporta os serviços
 require('dotenv').config();
 
 const mercadopago = require('mercadopago');
@@ -25,7 +23,7 @@ const client = new Client({
   }
 });
 
-// =========== DADOS DA LOJA (ATUALIZADO) ===========
+// =========== DADOS DA LOJA ===========
 const DADOS_LOJA = {
   nome: 'Ce Cópias',
   horario: 'Segunda a Sexta: 8:30 às 17:00\nSábado e Domingo: Fechado',
@@ -34,39 +32,26 @@ const DADOS_LOJA = {
   instagram: 'https://www.instagram.com/ce_copias/'
 };
 
-// =========== CONTROLE DE CLIENTES E HISTÓRICO ===========
+// =========== CONTROLE DE CLIENTES ===========
 const clienteStatus = {};
-const clienteUltimaAtividade = {};
 const clienteHistorico = {};
-const TIMEOUT_EXPIRACAO = 3 * 60 * 1000; // 3 minutos de inatividade p/ expiração timer de arquivo
-const TEMPO_PERSISTENCIA_ESTADO = 15 * 60 * 1000; // 15min sessão ativa
+const TIMEOUT_EXPIRACAO = 3 * 60 * 1000; // 3 minutos
+const TEMPO_PERSISTENCIA_ESTADO = 15 * 60 * 1000; // 15 minutos
 
 // =========== FUNÇÕES DE SUPORTE ===========
-function clienteAtendimentoPresencial(texto) {
-  texto = texto.toLowerCase();
-  return [
-    "já estou aí", "estou na loja", "vou pagar pessoalmente", "já resolvi com vocês",
-    "não vou pagar pelo whatsapp", "vou pagar aí", "atendimento presencial",
-    "não uso whatsapp para isso", "não vou pagar pelo zap", "não pagarei aqui"
-  ].some(frase => texto.includes(frase));
-}
-
 function resetarCliente(clienteId, forcarTotal = false) {
   if (forcarTotal) {
     delete clienteStatus[clienteId];
-    delete clienteUltimaAtividade[clienteId];
     delete clienteHistorico[clienteId];
     console.log(`Estado do cliente ${clienteId} resetado (total).`);
   } else {
     if (!clienteStatus[clienteId]) clienteStatus[clienteId] = {};
     clienteStatus[clienteId].inativo = true;
-    clienteStatus[clienteId].temporizadores = {};
     setTimeout(() => {
       if (clienteStatus[clienteId]?.inativo) {
         delete clienteStatus[clienteId];
-        delete clienteUltimaAtividade[clienteId];
         delete clienteHistorico[clienteId];
-        console.log(`Estado do cliente ${clienteId} expurgado após 15 minutos de inatividade total.`);
+        console.log(`Estado do cliente ${clienteId} expurgado após 15 minutos inativo.`);
       }
     }, TEMPO_PERSISTENCIA_ESTADO);
   }
@@ -120,10 +105,9 @@ function formatarMensagemBonita(titulo, corpo, rodape = '') {
 
 // =========== OPENAI: DETECÇÃO DE INTENÇÃO ===========
 async function detectarIntencaoComOpenAI(clienteId, textoNovo = '') {
-  // Monta histórico como contexto (últimos 15 msgs)
   const historico = clienteHistorico[clienteId] || [];
   const contexto = `
-Você é um atendente de uma loja de impressão chamada ${DADOS_LOJA.nome}. 
+Você é um atendente de uma loja de impressão chamada ${DADOS_LOJA.nome}.
 Horário: ${DADOS_LOJA.horario}.
 Endereço: ${DADOS_LOJA.endereco}.
 PIX: ${DADOS_LOJA.pix}
@@ -137,7 +121,7 @@ ${historico.slice(-15).map(m => `- ${m}`).join('\n')}
 Mensagem mais recente:
 "${textoNovo}"
 
-Diga qual a real intenção do cliente. Se for atendimento presencial, só avise "presencial". 
+Diga qual a real intenção do cliente. Se for atendimento presencial, só avise "presencial".
 Se for arquivo aguardando resposta, avise "aguardando". Se for venda, orçamento, dúvida, pagamento, confirmação, etc, responda com uma das palavras:
 - saudacao, venda, pagamento, agendamento, comprovante, duvida, cancelar, confirmacao, presencial, aguardando, finalizado, outro
 Se não souber, responda "outro".
@@ -155,37 +139,33 @@ Retorne só a palavra da intenção, nada mais.
   }
 }
 
-// =========== TIMER ARQUIVO NORMAL ===========
+// =========== TIMER ARQUIVO ===========
 async function iniciarTimerArquivo(message, clienteId) {
   const status = clienteStatus[clienteId];
   if (!status) return;
   if (status.timerArquivo) clearTimeout(status.timerArquivo);
 
   status.timerArquivo = setTimeout(async () => {
-    // Verificar de novo a intenção, histórico e presencial antes de agir!
     const intencao = await detectarIntencaoComOpenAI(clienteId, '(timeout arquivo)');
     if (
       intencao === 'presencial' ||
       intencao === 'finalizado' ||
       intencao === 'confirmacao'
     ) return;
-    // Só envia aviso se realmente for arquivo pendente e cliente não responder
     const corpo = `⚠️ Seu pedido está quase pronto, mas preciso saber como continuar. Se quiser agendar para amanhã ou retirar depois, é só pagar agora e deixamos tudo pronto pra você!`;
     const rodape = `\n\n💸 *Pagamento antecipado garante o seu pedido pronto na hora!*\n\nPague via Mercado Pago ou envie comprovante do PIX:\nPIX: ${DADOS_LOJA.pix}`;
     await message.reply(formatarMensagemBonita('Pedido Pendente', corpo, rodape));
-    // Limpa o status do timer
     status.timerArquivo = null;
   }, TIMEOUT_EXPIRACAO);
 }
 
-// =========== TIMER PARA ATENDIMENTO PRESENCIAL COM ARQUIVOS ===========
+// =========== TIMER ATENDIMENTO PRESENCIAL ===========
 async function iniciarTimerPresencialArquivo(message, clienteId) {
   const status = clienteStatus[clienteId];
   if (!status) return;
   if (status.timerPresencialArquivo) clearTimeout(status.timerPresencialArquivo);
 
   status.timerPresencialArquivo = setTimeout(async () => {
-    // Só avisa se ainda não teve resposta textual
     const aviso = `⏰ *Atenção!*
 Não recebemos nenhuma resposta sua nos últimos minutos. Por isso, o atendimento será *cancelado* para liberar a fila.
 
@@ -196,15 +176,12 @@ Se quiser garantir seu pedido pronto para retirada, basta agendar e *efetuar o p
 Qualquer dúvida ou necessidade, pode chamar! Estou aqui para te ajudar. 📲`;
 
     await message.reply(aviso);
-    resetarCliente(clienteId, true); // Encerra o atendimento
-  }, 5 * 60 * 1000); // 5 minutos
+    resetarCliente(clienteId, true);
+  }, 5 * 60 * 1000);
 }
 
-// =========== EVENTOS PRINCIPAIS ===========
-
-// ==== QR CODE ATUALIZADO E COMPATÍVEL ====
+// =========== EVENTOS ===========
 client.on('qr', (qr) => {
-  // Gera QR code no terminal, sempre pequeno (compatível)
   try {
     qrcode.generate(qr, { small: true });
     console.log('\n\n📱 *Abra o app do WhatsApp, toque em Dispositivos Conectados > Conectar Novo*');
@@ -212,12 +189,6 @@ client.on('qr', (qr) => {
   } catch (e) {
     console.log('❌ Falha ao exibir QR code no terminal.');
   }
-
-  // Também exibe link para QR code online (pra abrir em navegador se quiser)
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`;
-  console.log('Se o QR não aparecer ou ficar bugado no terminal, abra este link num navegador:');
-  console.log(qrUrl);
-  console.log('\nSe precisar, copie o QR e cole em outro lugar, ou use o site acima.');
 });
 
 client.on('ready', () => {
@@ -230,7 +201,6 @@ client.on('message', async (message) => {
   const clienteId = message.from;
   let texto = message.body?.trim() || "";
 
-  // Salvar histórico completo da sessão do cliente (limite 25 mensagens)
   if (!clienteHistorico[clienteId]) clienteHistorico[clienteId] = [];
   if (texto) clienteHistorico[clienteId].push(texto);
   if (clienteHistorico[clienteId].length > 25) clienteHistorico[clienteId].shift();
@@ -238,84 +208,33 @@ client.on('message', async (message) => {
   if (!clienteStatus[clienteId]) clienteStatus[clienteId] = {};
   const status = clienteStatus[clienteId];
 
-  // Sair do modo inativo
   if (status.inativo) status.inativo = false;
 
-  // ============= CONTROLE RIGOROSO DE SAUDAÇÃO ÚNICA =============
-  if (!status.saudacaoEnviada) status.saudacaoEnviada = false;
   const primeiraInteracao = !status.primeiraInteracaoConcluida;
   const isGreeting = /^(oi|olá|ola|bom dia|boa tarde|boa noite|\.)$/i.test(texto);
 
-  // SAUDAÇÃO: só uma vez por sessão, bonita e com propaganda
   if (primeiraInteracao && isGreeting) {
     status.primeiraInteracaoConcluida = true;
     status.saudacaoEnviada = true;
     const msg = formatarMensagemBonita(
       `Bem-vindo(a) à ${DADOS_LOJA.nome}!`,
-      `✨ Imprimimos, digitalizamos, fazemos foto 3x4 e muito mais, sempre com rapidez e preço justo.
-
-📍 *Endereço:* ${DADOS_LOJA.endereco}
-🕗 *Horário:* ${DADOS_LOJA.horario}
-
-💡 Salve nosso número e indique para amigos!
-🔗 [Siga no Instagram](${DADOS_LOJA.instagram}) 😉`
+      `✨ Imprimimos, digitalizamos, fazemos foto 3x4 e muito mais, sempre com rapidez e preço justo.\n\n` +
+      `📍 *Endereço:* ${DADOS_LOJA.endereco}\n🕗 *Horário:* ${DADOS_LOJA.horario}\n\n` +
+      `💡 Salve nosso número e indique para amigos!\n🔗 [Siga no Instagram](${DADOS_LOJA.instagram}) 😉`
     );
     await message.reply(msg);
     status.ultimoEvento = Date.now();
     return;
   }
 
-  // ARQUIVO como primeiro contato: modo presencial
-  if (message.hasMedia && primeiraInteracao) {
-    status.primeiraInteracaoConcluida = true;
-    status.saudacaoEnviada = true;
-    status.modoPresencial = true;
-    await message.reply('📄 Arquivo recebido! Aguardo instruções para prosseguir com o atendimento.');
-    status.ultimoEvento = Date.now();
-    iniciarTimerPresencialArquivo(message, clienteId); // <- inicia timer presencial ao receber arquivo como 1º contato
-    return;
-  }
-
-  // NOVO ARQUIVO após o primeiro: só avisa adicionado e inicia timer de espera
-  if (message.hasMedia && status.modoPresencial) {
-    await message.reply('📎 Novo arquivo adicionado. Aguardando suas instruções!');
-    status.ultimoEvento = Date.now();
-    iniciarTimerPresencialArquivo(message, clienteId); // <- inicia/reinicia timer presencial
-    return;
-  }
-
-  // Se o cliente responder qualquer mensagem textual, cancela o timer presencial de arquivos
-  if (status.timerPresencialArquivo && texto) {
-    clearTimeout(status.timerPresencialArquivo);
-    status.timerPresencialArquivo = null;
-  }
-
-  // ARQUIVO recebido sem modo presencial
-  if (message.hasMedia && !status.modoPresencial) {
-    await message.reply('📄 Arquivo recebido! Como posso ajudar você com esse arquivo?');
-    status.ultimoEvento = Date.now();
-    iniciarTimerArquivo(message, clienteId);
-    return;
-  }
-
-  // Se o cliente responder qualquer coisa, cancela o timer de arquivo "normal"
-  if (status.timerArquivo) {
-    clearTimeout(status.timerArquivo);
-    status.timerArquivo = null;
-  }
-
-  // Detecta intenção geral
   const intencao = await detectarIntencaoComOpenAI(clienteId, texto);
 
-  // BLOQUEIA qualquer aviso burro em modo presencial
   if (intencao === 'presencial' || status.modoPresencial) {
     status.ultimoEvento = Date.now();
     return;
   }
 
-  // DETECÇÃO INTELIGENTE DE VENDAS, ORÇAMENTOS E SERVIÇOS
   if (intencao === 'venda' || mensagemEhVenda(texto)) {
-    // Exemplo básico de orçamento (ajuste para seu fluxo!)
     const servico = identificarServicoCurto(texto);
     if (servico) {
       await message.reply(formatarMensagemBonita(
@@ -327,7 +246,6 @@ client.on('message', async (message) => {
     }
   }
 
-  // Confirmação de pedido
   if (["sim", "confirmo", "quero", "fechar", "confirmar", "pode ser", "ok"].includes(texto.toLowerCase()) || intencao === 'confirmacao') {
     await message.reply(formatarMensagemBonita(
       'Pedido Confirmado!',
@@ -337,7 +255,6 @@ client.on('message', async (message) => {
     return;
   }
 
-  // Pagamento, comprovante, agendamento, etc
   if (intencao === 'pagamento' || intencao === 'agendamento') {
     await message.reply(formatarMensagemBonita(
       'Pagamento e Agendamento',
@@ -347,7 +264,6 @@ client.on('message', async (message) => {
     return;
   }
 
-  // Mensagem de dúvida
   if (intencao === 'duvida' || texto.endsWith('?')) {
     await message.reply(formatarMensagemBonita(
       'Dúvida',
@@ -357,7 +273,6 @@ client.on('message', async (message) => {
     return;
   }
 
-  // Outras situações (finalizado, cancelado, etc)
   if (["cancelar", "não quero", "desistir"].includes(texto.toLowerCase()) || intencao === 'cancelar') {
     await message.reply(formatarMensagemBonita(
       'Atendimento Cancelado',
@@ -367,7 +282,6 @@ client.on('message', async (message) => {
     return;
   }
 
-  // Mensagens não identificadas (fallback)
   if (intencao === 'outro') {
     await message.reply(formatarMensagemBonita(
       '🤔 Não entendi',
@@ -380,5 +294,5 @@ client.on('message', async (message) => {
   status.ultimoEvento = Date.now();
 });
 
-// =========== INICIALIZAÇÃO ===========
+// Inicializa o client
 client.initialize();
